@@ -1,9 +1,12 @@
 // BetaHudIcons.cpp
 // GTA San Andreas PC v1.0 US - jetpack / cep telefonu HUD weapon ikonu (beta ozelligi)
 //
+// - Ikonlar oyunun kendi dosyalarindan alinir: jetpack.txd\jetpackicon, cellphone.txd\cellphoneicon
+//   (gta3.img icinde, oyun kullanmaz). Istenirse yedek olarak BetaHudIcons.txd de kullanilabilir.
 // - Orijinal weapon ikonu MinHook ile cizilirken yutulur ve koordinati yakalanir.
 // - Kendi ikonumuz yakalanan koordinata birebir cizilir (INI'den scale/shift ile ince ayar).
 // - Ikon HUD'dan ONCE cizilir, boylece mermi yazisi (outline'i ile) ustte kalir.
+// - Jetpackte kullanilamayan silahin mermi sayisi gizlenir.
 //
 // Hook'lanan fonksiyonlar (SA 1.0 US, MTA kaynaginda ayni adresler):
 //   CSprite2d::Draw(CRect const&, CRGBA const&)        0x728350  (thiscall)
@@ -34,12 +37,23 @@ using namespace plugin;
 
 class BetaHudIcons {
 public:
-    static inline CSprite2d phoneSprite;
+    // Yedek (kendi txd'miz) ve oyundan odunc alinan sprite'lar
+    static inline CSprite2d phoneSprite;       // BetaHudIcons.txd'den (yedek)
     static inline CSprite2d jetpackSprite;
+    static inline CSprite2d gamePhoneSprite;   // oyunun txd'sinden (sahiplik YOK, her kare yeniden cozulur)
+    static inline CSprite2d gameJetpackSprite;
     static inline int txdSlot = -1;
-    static inline bool loaded = false;
+    static inline bool loaded = false;         // yedek txd yuklendi mi
+
+    enum Kind { K_NONE, K_JETPACK, K_PHONE };
+    static inline Kind curKind = K_NONE;
 
     // --- INI ayarlari ---
+    // Texture kaynagi: 0 = otomatik (once oyun, olmazsa yedek txd), 1 = sadece oyun, 2 = sadece BetaHudIcons.txd
+    static inline int   source = 0;
+    static inline std::string phoneTxdName = "cellphone", phoneTexName = "cellphoneicon";
+    static inline std::string jetTxdName   = "jetpack",   jetTexName   = "jetpackicon";
+
     // Yedek konum (orijinal rect yakalanamazsa) + orijinal ikonu ARAMA kutusu
     static inline float posX  = 322.0f;  // SAG kenara uzaklik (sanal birim)
     static inline float posY  = 44.0f;   // ustten uzaklik
@@ -88,6 +102,12 @@ public:
         return (float)(int)GetPrivateProfileIntA("Icon", key, def, ini.c_str());
     }
 
+    static std::string ReadS(const char* section, const char* key, const char* def, const std::string& ini) {
+        char buf[128] = {};
+        GetPrivateProfileStringA(section, key, def, buf, sizeof(buf), ini.c_str());
+        return std::string(buf);
+    }
+
     static void LoadSettings() {
         std::string ini = GetIniPath() + "BetaHudIcons.ini";
         posX  = ReadF("OffsetFromRight", 322, ini);
@@ -108,6 +128,16 @@ public:
         for (char* tok = strtok(buf, ", "); tok; tok = strtok(nullptr, ", "))
             list.push_back(atoi(tok));
         if (!list.empty()) usableWeapons = list;
+
+        source = (int)GetPrivateProfileIntA("Textures", "Source", 0, ini.c_str());
+        phoneTxdName = ReadS("Textures", "PhoneTxd",     "cellphone",     ini);
+        phoneTexName = ReadS("Textures", "PhoneTexture", "cellphoneicon", ini);
+        jetTxdName   = ReadS("Textures", "JetpackTxd",     "jetpack",     ini);
+        jetTexName   = ReadS("Textures", "JetpackTexture", "jetpackicon", ini);
+    }
+
+    static bool IsOurSprite(CSprite2d* s) {
+        return s == &phoneSprite || s == &jetpackSprite || s == &gamePhoneSprite || s == &gameJetpackSprite;
     }
 
     // Ikon ARAMA kutusu icinde mi (INI konumu +- genis tolerans) ve ikon gibi buyuk mu?
@@ -139,7 +169,7 @@ public:
 
     // --- Hook: CSprite2d::Draw(CRect const&, CRGBA const&) ---
     static void __fastcall DrawHook(CSprite2d* self, void* /*edx*/, CRect const& rect, CRGBA const& color) {
-        if (suppress && self != &phoneSprite && self != &jetpackSprite) {
+        if (suppress && !IsOurSprite(self)) {
             const float* f = reinterpret_cast<const float*>(&rect); // pozisyonel: x1, y1, x2, y2
             if (LooksLikeWeaponIcon(f[0], f[1], f[2], f[3])) {
                 Accumulate(f[0], f[1], f[2], f[3]);
@@ -178,9 +208,12 @@ public:
         hooksOk = false;
     }
 
-    // Oyun RW'yi baslattiktan sonra texture yukle
+    // Yedek: BetaHudIcons.txd (sadece dosya varsa ve kaynak "sadece oyun" degilse)
     static void LoadTextures() {
+        if (source == 1) return;
         std::string txd = GetIniPath() + "BetaHudIcons.txd";
+        if (GetFileAttributesA(txd.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+
         txdSlot = CTxdStore::AddTxdSlot("betahudicons");
         CTxdStore::LoadTxd(txdSlot, txd.c_str());
         CTxdStore::AddRef(txdSlot);
@@ -190,6 +223,23 @@ public:
         jetpackSprite.SetTexture((char*)"jetpack_icon");
         CTxdStore::PopCurrentTxd();
         loaded = true;
+    }
+
+    // Oyunun kendi txd'sinden texture'i bul ve sprite'a ODUNC ver.
+    // Not: txd'ler streaming ile yuklenir; jetpack/telefon aktifken modelleri yuklu oldugu icin
+    // genelde hazirdir. Hazir degilse (dictionary yok) false doner, yedege dusulur.
+    static bool ResolveGameTexture(Kind k, CSprite2d& spr) {
+        const std::string& txd = (k == K_JETPACK) ? jetTxdName : phoneTxdName;
+        const std::string& tex = (k == K_JETPACK) ? jetTexName : phoneTexName;
+
+        int slot = CTxdStore::FindTxdSlot((char*)txd.c_str());
+        if (slot < 0) return false;
+        RwTexDictionary* dict = CTxdStore::GetTxd(slot);   // DOGRULA: plugin-sdk'de GetTxd yoksa pool'dan okunur
+        if (!dict) return false;
+        RwTexture* t = RwTexDictionaryFindNamedTexture(dict, tex.c_str());
+        if (!t) return false;
+        spr.m_pTexture = t;                                 // DOGRULA: alan adi m_pTexture
+        return true;
     }
 
     static bool PlayerHasJetpack(CPlayerPed* p) {
@@ -203,14 +253,26 @@ public:
             || RpAnimBlendClumpGetAssociation(p->m_pRwClump, "phone_out")  != nullptr;
     }
 
-    // Su an hangi ikon gosterilmeli? (nullptr = hicbiri)
+    // Su an hangi ikon gosterilmeli ve CIZILEBILIR mi? (nullptr = hicbiri; curKind'i de ayarlar)
     static CSprite2d* CurrentSprite() {
-        if (!loaded) return nullptr;
+        curKind = K_NONE;
         CPlayerPed* player = FindPlayerPed(0);
         if (!player) return nullptr;
-        if (PlayerHasJetpack(player)) return &jetpackSprite;
-        if (PlayerUsingPhone(player)) return &phoneSprite;
-        return nullptr;
+
+        Kind k = K_NONE;
+        if (PlayerHasJetpack(player))      k = K_JETPACK;
+        else if (PlayerUsingPhone(player)) k = K_PHONE;
+        if (k == K_NONE) return nullptr;
+
+        CSprite2d& game   = (k == K_JETPACK) ? gameJetpackSprite : gamePhoneSprite;
+        CSprite2d& custom = (k == K_JETPACK) ? jetpackSprite     : phoneSprite;
+
+        CSprite2d* result = nullptr;
+        if (source != 2 && ResolveGameTexture(k, game)) result = &game;
+        else if (source != 1 && loaded && custom.m_pTexture) result = &custom;
+
+        if (result) curKind = k; // texture yoksa orijinali yutmayiz ve slotla da oynamayiz
+        return result;
     }
 
     static void DrawIcon(CSprite2d* spr) {
@@ -230,6 +292,10 @@ public:
             y = SCREEN_COORD_TOP(posY);
         }
         spr->Draw(CRect(x, y, x + w, y + h), CRGBA(255, 255, 255, 255));
+
+        // Oyundan odunc alinan texture'a sahip degiliz: cizim bitince birak (yikici cift silmeyi onler)
+        if (spr == &gamePhoneSprite || spr == &gameJetpackSprite)
+            spr->m_pTexture = nullptr;
     }
 
     // Ped yapisi ofsetleri (SA 1.0 US): aktif silah slotu 0x718 (dogrulandi), silah dizisi 0x5A0, her silah 0x1C bayt, ilk alan = silah tipi
@@ -251,12 +317,13 @@ public:
         CSprite2d* spr = CurrentSprite();
         suppress = hooksOk && spr != nullptr;
         if (!spr) { haveCap = false; return; }
+
         // Hook calisiyorsa ikonu HUD'dan once ciz: mermi yazisi (outline'i ile) ustte kalir.
         if (hooksOk) DrawIcon(spr);
 
         // Jetpackte kullanilamayan silah elindeyse: HUD cizimi boyunca slotu gecici "yumruk" yap,
         // boylece mermi sayisi cizilmez (yumruk ikonunu zaten hook yutuyor).
-        if (hideAmmoUnusable && spr == &jetpackSprite) {
+        if (hideAmmoUnusable && curKind == K_JETPACK) {
             CPlayerPed* p = FindPlayerPed(0);
             if (p) {
                 unsigned char slot = ActiveSlot(p);
@@ -301,11 +368,15 @@ public:
         Events::drawHudEvent.after  += []() { AfterHud(); };
         Events::shutdownRwEvent += []() {
             RemoveHooks();
-            phoneSprite.Delete();
-            jetpackSprite.Delete();
-            if (txdSlot >= 0) {
-                CTxdStore::RemoveRef(txdSlot);
-                CTxdStore::RemoveTxdSlot(txdSlot);
+            gamePhoneSprite.m_pTexture = nullptr;     // odunc, silme
+            gameJetpackSprite.m_pTexture = nullptr;
+            if (loaded) {
+                phoneSprite.Delete();
+                jetpackSprite.Delete();
+                if (txdSlot >= 0) {
+                    CTxdStore::RemoveRef(txdSlot);
+                    CTxdStore::RemoveTxdSlot(txdSlot);
+                }
             }
         };
     }
