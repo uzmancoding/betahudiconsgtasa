@@ -38,7 +38,8 @@ public:
     static inline float sizeH = 60.0f;
 
     // Jetpack/telefon aktifken orijinal silah ikonunu + mermi yazisini gizle (HUD cizimi boyunca slotu gecici "yumruk" yapar)
-    static inline bool hideOriginal = true;
+    // DIKKAT: acik olursa nisangah da kaybolur ve yumruk ikonu gizlenmez. Varsayilan KAPALI.
+    static inline bool hideOriginal = false;
     static inline unsigned char savedSlot = 0;
     static inline bool swapped = false;
 
@@ -58,7 +59,7 @@ public:
         posY  = (float)GetPrivateProfileIntA("Icon", "OffsetFromTop",   27, ini.c_str());
         sizeW = (float)GetPrivateProfileIntA("Icon", "Width",  60, ini.c_str());
         sizeH = (float)GetPrivateProfileIntA("Icon", "Height", 60, ini.c_str());
-        hideOriginal = GetPrivateProfileIntA("Icon", "HideOriginal", 1, ini.c_str()) != 0;
+        hideOriginal = GetPrivateProfileIntA("Icon", "HideOriginal", 0, ini.c_str()) != 0;
     }
 
     // Aktif silah slotu: SA 1.0 US'de CPed + 0x718 (alan adi plugin-sdk'de degisken oldugu icin ofsetle erisiyoruz)
