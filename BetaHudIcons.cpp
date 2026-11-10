@@ -61,16 +61,20 @@ public:
         hideOriginal = GetPrivateProfileIntA("Icon", "HideOriginal", 1, ini.c_str()) != 0;
     }
 
+    // Aktif silah slotu: SA 1.0 US'de CPed + 0x718 (alan adi plugin-sdk'de degisken oldugu icin ofsetle erisiyoruz)
+    static unsigned char& ActiveSlot(CPlayerPed* p) {
+        return *reinterpret_cast<unsigned char*>(reinterpret_cast<char*>(p) + 0x718);
+    }
+
     // HUD cizilmeden HEMEN once: orijinal ikon/mermi yazisi cizilmesin diye slotu gecici degistir.
-    // DOGRULA: m_nActiveWeaponSlot alan adi plugin-sdk surumune gore farkli olabilir.
     static void BeforeHud() {
         swapped = false;
         if (!hideOriginal) return;
         CPlayerPed* p = FindPlayerPed(0);
         if (!p) return;
         if (!PlayerHasJetpack(p) && !PlayerUsingPhone(p)) return;
-        savedSlot = p->m_nActiveWeaponSlot;
-        p->m_nActiveWeaponSlot = 0;
+        savedSlot = ActiveSlot(p);
+        ActiveSlot(p) = 0;
         swapped = true;
     }
 
@@ -78,7 +82,7 @@ public:
     static void AfterHud() {
         if (swapped) {
             CPlayerPed* p = FindPlayerPed(0);
-            if (p) p->m_nActiveWeaponSlot = savedSlot;
+            if (p) ActiveSlot(p) = savedSlot;
             swapped = false;
         }
         DrawIcons();
