@@ -1,6 +1,9 @@
 // BetaHudIcons.cpp
 // GTA San Andreas PC v1.0 US - jetpack / cep telefonu HUD weapon ikonu (beta ozelligi)
-// Orijinal weapon ikonu, ikon kutusuna dusen cizimler MinHook ile engellenerek gizlenir.
+//
+// - Orijinal weapon ikonu MinHook ile cizilirken yutulur ve koordinati yakalanir.
+// - Kendi ikonumuz yakalanan koordinata birebir cizilir (INI'den scale/shift ile ince ayar).
+// - Ikon HUD'dan ONCE cizilir, boylece mermi yazisi (outline'i ile) ustte kalir.
 //
 // Hook'lanan fonksiyonlar (SA 1.0 US, MTA kaynaginda ayni adresler):
 //   CSprite2d::Draw(CRect const&, CRGBA const&)        0x728350  (thiscall)
@@ -34,15 +37,26 @@ public:
     static inline int txdSlot = -1;
     static inline bool loaded = false;
 
-    // INI ayarlari (sanal birim, SCREEN_COORD ile olceklenir)
-    static inline float posX  = 317.0f;  // ikonun SAG kenara uzakligi
-    static inline float posY  = 50.0f;   // ustten uzaklik
-    static inline float sizeW = 100.0f;
-    static inline float sizeH = 100.0f;
+    // --- INI ayarlari ---
+    // Yedek konum (orijinal rect yakalanamazsa) + orijinal ikonu ARAMA kutusu
+    static inline float posX  = 322.0f;  // SAG kenara uzaklik (sanal birim)
+    static inline float posY  = 44.0f;   // ustten uzaklik
+    static inline float sizeW = 108.0f;
+    static inline float sizeH = 132.0f;
     static inline bool  hideOriginal = true;
+    // Orijinal rect'e gore ince ayar
+    static inline bool  useOriginalRect = true;
+    static inline float scaleW = 100.0f; // yuzde
+    static inline float scaleH = 100.0f; // yuzde
+    static inline float shiftX = 0.0f;   // sanal birim (+ = saga)
+    static inline float shiftY = 0.0f;   // sanal birim (+ = asagi)
 
-    // HUD cizilirken ve jetpack/telefon aktifken true: orijinal ikon cizimleri yutulur
-    static inline bool suppress = false;
+    // --- Durum ---
+    static inline bool suppress = false;           // HUD cizilirken ve ikon aktifken true
+    static inline bool  accValid = false;          // bu karede yakalanan rect'ler
+    static inline float accL = 0, accT = 0, accR = 0, accB = 0;
+    static inline bool  haveCap = false;           // son yakalanan orijinal ikon rect'i
+    static inline float capL = 0, capT = 0, capR = 0, capB = 0;
 
     typedef void(__thiscall* Sprite2dDraw_t)(CSprite2d*, CRect const&, CRGBA const&);
     typedef void(__cdecl* RenderXLU_t)(float, float, float, float, float,
@@ -62,35 +76,59 @@ public:
         return p.substr(0, p.find_last_of("\\/") + 1);
     }
 
-    static void LoadSettings() {
-        std::string ini = GetIniPath() + "BetaHudIcons.ini";
-        posX  = (float)GetPrivateProfileIntA("Icon", "OffsetFromRight", 317, ini.c_str());
-        posY  = (float)GetPrivateProfileIntA("Icon", "OffsetFromTop",   50,  ini.c_str());
-        sizeW = (float)GetPrivateProfileIntA("Icon", "Width",  100, ini.c_str());
-        sizeH = (float)GetPrivateProfileIntA("Icon", "Height", 100, ini.c_str());
-        hideOriginal = GetPrivateProfileIntA("Icon", "HideOriginal", 1, ini.c_str()) != 0;
+    static float ReadF(const char* key, int def, const std::string& ini) {
+        return (float)(int)GetPrivateProfileIntA("Icon", key, def, ini.c_str());
     }
 
-    // Ekran koordinatinda ikon kutusu icinde mi? (kucuk bir tolerans payi ile)
-    static bool InIconBox(float x1, float y1, float x2, float y2) {
+    static void LoadSettings() {
+        std::string ini = GetIniPath() + "BetaHudIcons.ini";
+        posX  = ReadF("OffsetFromRight", 322, ini);
+        posY  = ReadF("OffsetFromTop",   44,  ini);
+        sizeW = ReadF("Width",  108, ini);
+        sizeH = ReadF("Height", 132, ini);
+        hideOriginal    = GetPrivateProfileIntA("Icon", "HideOriginal", 1, ini.c_str()) != 0;
+        useOriginalRect = GetPrivateProfileIntA("Icon", "UseOriginalRect", 1, ini.c_str()) != 0;
+        scaleW = ReadF("ScaleWidthPercent",  100, ini);
+        scaleH = ReadF("ScaleHeightPercent", 100, ini);
+        shiftX = ReadF("ShiftX", 0, ini);
+        shiftY = ReadF("ShiftY", 0, ini);
+    }
+
+    // Ikon ARAMA kutusu icinde mi (INI konumu +- genis tolerans) ve ikon gibi buyuk mu?
+    static bool LooksLikeWeaponIcon(float x1, float y1, float x2, float y2) {
         float l = (std::min)(x1, x2), r = (std::max)(x1, x2);
         float t = (std::min)(y1, y2), b = (std::max)(y1, y2);
 
-        const float m = SCREEN_COORD(10.0f);
+        if ((r - l) < SCREEN_COORD(50.0f) || (b - t) < SCREEN_COORD(50.0f))
+            return false; // kucuk seyleri (bar, yildiz vs.) yutma
+
+        const float m = SCREEN_COORD(20.0f);
         float bx0 = SCREEN_COORD_RIGHT(posX) - m;
         float by0 = SCREEN_COORD_TOP(posY) - m;
         float bx1 = SCREEN_COORD_RIGHT(posX) + SCREEN_COORD(sizeW) + m;
         float by1 = SCREEN_COORD_TOP(posY) + SCREEN_COORD(sizeH) + m;
-
         return l >= bx0 && r <= bx1 && t >= by0 && b <= by1;
+    }
+
+    static void Accumulate(float x1, float y1, float x2, float y2) {
+        float l = (std::min)(x1, x2), r = (std::max)(x1, x2);
+        float t = (std::min)(y1, y2), b = (std::max)(y1, y2);
+        if (!accValid) {
+            accL = l; accT = t; accR = r; accB = b; accValid = true;
+        } else {
+            accL = (std::min)(accL, l); accT = (std::min)(accT, t);
+            accR = (std::max)(accR, r); accB = (std::max)(accB, b);
+        }
     }
 
     // --- Hook: CSprite2d::Draw(CRect const&, CRGBA const&) ---
     static void __fastcall DrawHook(CSprite2d* self, void* /*edx*/, CRect const& rect, CRGBA const& color) {
         if (suppress && self != &phoneSprite && self != &jetpackSprite) {
             const float* f = reinterpret_cast<const float*>(&rect); // pozisyonel: x1, y1, x2, y2
-            if (InIconBox(f[0], f[1], f[2], f[3]))
+            if (LooksLikeWeaponIcon(f[0], f[1], f[2], f[3])) {
+                Accumulate(f[0], f[1], f[2], f[3]);
                 return;
+            }
         }
         origDraw(self, rect, color);
     }
@@ -100,8 +138,10 @@ public:
                                 unsigned char r, unsigned char g, unsigned char b,
                                 short intensity, float rhw, unsigned char a,
                                 unsigned char uDir, unsigned char vDir) {
-        if (suppress && InIconBox(x - hw, y - hh, x + hw, y + hh))
+        if (suppress && LooksLikeWeaponIcon(x - hw, y - hh, x + hw, y + hh)) {
+            Accumulate(x - hw, y - hh, x + hw, y + hh);
             return;
+        }
         origXlu(x, y, z, hw, hh, r, g, b, intensity, rhw, a, uDir, vDir);
     }
 
@@ -152,29 +192,55 @@ public:
         if (!loaded) return nullptr;
         CPlayerPed* player = FindPlayerPed(0);
         if (!player) return nullptr;
-        if (PlayerHasJetpack(player))      return &jetpackSprite;
-        if (PlayerUsingPhone(player))      return &phoneSprite;
+        if (PlayerHasJetpack(player)) return &jetpackSprite;
+        if (PlayerUsingPhone(player)) return &phoneSprite;
         return nullptr;
     }
 
-    // HUD cizilmeden hemen once: orijinal ikon cizimlerini yutmaya basla
-    static void BeforeHud() {
-        suppress = hooksOk && CurrentSprite() != nullptr;
+    static void DrawIcon(CSprite2d* spr) {
+        float x, y, w, h;
+        if (useOriginalRect && haveCap) {
+            // Orijinal ikonun gercek rect'i + yuzde olcek + kaydirma
+            float cx = (capL + capR) * 0.5f, cy = (capT + capB) * 0.5f;
+            w = (capR - capL) * scaleW / 100.0f;
+            h = (capB - capT) * scaleH / 100.0f;
+            x = cx - w * 0.5f + SCREEN_COORD(shiftX);
+            y = cy - h * 0.5f + SCREEN_COORD(shiftY);
+        } else {
+            // Yedek: INI'deki sabit konum
+            w = SCREEN_COORD(sizeW);
+            h = SCREEN_COORD(sizeH);
+            x = SCREEN_COORD_RIGHT(posX);
+            y = SCREEN_COORD_TOP(posY);
+        }
+        spr->Draw(CRect(x, y, x + w, y + h), CRGBA(255, 255, 255, 255));
     }
 
-    // HUD cizildikten hemen sonra: yutmayi birak, kendi ikonumuzu ciz
+    // HUD cizilmeden HEMEN once
+    static void BeforeHud() {
+        accValid = false;
+        CSprite2d* spr = CurrentSprite();
+        suppress = hooksOk && spr != nullptr;
+        if (!spr) { haveCap = false; return; }
+        // Hook calisiyorsa ikonu HUD'dan once ciz: mermi yazisi (outline'i ile) ustte kalir.
+        if (hooksOk) DrawIcon(spr);
+    }
+
+    // HUD cizildikten HEMEN sonra
     static void AfterHud() {
+        bool wasSuppressing = suppress;
         suppress = false;
 
-        CSprite2d* spr = CurrentSprite();
-        if (!spr) return;
+        if (wasSuppressing && accValid) {
+            capL = accL; capT = accT; capR = accR; capB = accB;
+            haveCap = true;
+        }
 
-        float w = SCREEN_COORD(sizeW);
-        float h = SCREEN_COORD(sizeH);
-        float x = SCREEN_COORD_RIGHT(posX);
-        float y = SCREEN_COORD_TOP(posY);
-
-        spr->Draw(CRect(x, y, x + w, y + h), CRGBA(255, 255, 255, 255));
+        // Hook kurulamadiysa eski usul: HUD'dan sonra ustune ciz
+        if (!hooksOk) {
+            CSprite2d* spr = CurrentSprite();
+            if (spr) DrawIcon(spr);
+        }
     }
 
     BetaHudIcons() {
