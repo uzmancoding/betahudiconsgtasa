@@ -37,6 +37,11 @@ public:
     static inline float sizeW = 60.0f;
     static inline float sizeH = 60.0f;
 
+    // Jetpack/telefon aktifken orijinal silah ikonunu + mermi yazisini gizle (HUD cizimi boyunca slotu gecici "yumruk" yapar)
+    static inline bool hideOriginal = true;
+    static inline unsigned char savedSlot = 0;
+    static inline bool swapped = false;
+
     static std::string GetIniPath() {
         char path[MAX_PATH];
         HMODULE hm = nullptr;
@@ -53,6 +58,30 @@ public:
         posY  = (float)GetPrivateProfileIntA("Icon", "OffsetFromTop",   27, ini.c_str());
         sizeW = (float)GetPrivateProfileIntA("Icon", "Width",  60, ini.c_str());
         sizeH = (float)GetPrivateProfileIntA("Icon", "Height", 60, ini.c_str());
+        hideOriginal = GetPrivateProfileIntA("Icon", "HideOriginal", 1, ini.c_str()) != 0;
+    }
+
+    // HUD cizilmeden HEMEN once: orijinal ikon/mermi yazisi cizilmesin diye slotu gecici degistir.
+    // DOGRULA: m_nActiveWeaponSlot alan adi plugin-sdk surumune gore farkli olabilir.
+    static void BeforeHud() {
+        swapped = false;
+        if (!hideOriginal) return;
+        CPlayerPed* p = FindPlayerPed(0);
+        if (!p) return;
+        if (!PlayerHasJetpack(p) && !PlayerUsingPhone(p)) return;
+        savedSlot = p->m_nActiveWeaponSlot;
+        p->m_nActiveWeaponSlot = 0;
+        swapped = true;
+    }
+
+    // HUD cizildikten HEMEN sonra: slotu geri koy, sonra kendi ikonumuzu ciz.
+    static void AfterHud() {
+        if (swapped) {
+            CPlayerPed* p = FindPlayerPed(0);
+            if (p) p->m_nActiveWeaponSlot = savedSlot;
+            swapped = false;
+        }
+        DrawIcons();
     }
 
     // Oyun RW'yi baslattiktan sonra texture yukle
@@ -89,7 +118,6 @@ public:
 
         CPlayerPed* player = FindPlayerPed(0);
         if (!player) return;
-        if (CHud::bScriptDontDisplayAreaName && false) return; // yer tutucu, istersen HUD kapali kontrolu ekle
 
         CSprite2d* spr = nullptr;
         if (PlayerHasJetpack(player))       spr = &jetpackSprite;
@@ -108,7 +136,9 @@ public:
     BetaHudIcons() {
         LoadSettings();
         Events::initRwEvent += []() { LoadTextures(); };
-        Events::drawHudEvent += []() { DrawIcons(); };
+        // DOGRULA: .before/.after plugin-sdk'de yoksa derleme hatasi verir, haber ver.
+        Events::drawHudEvent.before += []() { BeforeHud(); };
+        Events::drawHudEvent.after  += []() { AfterHud(); };
         Events::shutdownRwEvent += []() {
             phoneSprite.Delete();
             jetpackSprite.Delete();
