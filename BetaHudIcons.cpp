@@ -26,6 +26,8 @@
 
 #include <string>
 #include <algorithm>
+#include <vector>
+#include <cstdlib>
 #include <windows.h>
 
 using namespace plugin;
@@ -50,6 +52,12 @@ public:
     static inline float scaleH = 100.0f; // yuzde
     static inline float shiftX = 0.0f;   // sanal birim (+ = saga)
     static inline float shiftY = 0.0f;   // sanal birim (+ = asagi)
+
+    // Jetpackteyken kullanilamayan silahin mermi sayisini gizle
+    static inline bool hideAmmoUnusable = true;
+    static inline std::vector<int> usableWeapons = { 22, 23, 24, 28, 32 }; // pistol, silenced, deagle, uzi, tec9
+    static inline unsigned char savedSlot = 0;
+    static inline bool swapped = false;
 
     // --- Durum ---
     static inline bool suppress = false;           // HUD cizilirken ve ikon aktifken true
@@ -92,6 +100,14 @@ public:
         scaleH = ReadF("ScaleHeightPercent", 100, ini);
         shiftX = ReadF("ShiftX", 0, ini);
         shiftY = ReadF("ShiftY", 0, ini);
+
+        hideAmmoUnusable = GetPrivateProfileIntA("Jetpack", "HideAmmoWhenUnusable", 1, ini.c_str()) != 0;
+        char buf[256] = {};
+        GetPrivateProfileStringA("Jetpack", "UsableWeapons", "22,23,24,28,32", buf, sizeof(buf), ini.c_str());
+        std::vector<int> list;
+        for (char* tok = strtok(buf, ", "); tok; tok = strtok(nullptr, ", "))
+            list.push_back(atoi(tok));
+        if (!list.empty()) usableWeapons = list;
     }
 
     // Ikon ARAMA kutusu icinde mi (INI konumu +- genis tolerans) ve ikon gibi buyuk mu?
@@ -216,18 +232,53 @@ public:
         spr->Draw(CRect(x, y, x + w, y + h), CRGBA(255, 255, 255, 255));
     }
 
+    // Ped yapisi ofsetleri (SA 1.0 US): aktif silah slotu 0x718 (dogrulandi), silah dizisi 0x5A0, her silah 0x1C bayt, ilk alan = silah tipi
+    static unsigned char& ActiveSlot(CPlayerPed* p) {
+        return *reinterpret_cast<unsigned char*>(reinterpret_cast<char*>(p) + 0x718);
+    }
+    static int WeaponTypeInSlot(CPlayerPed* p, int slot) {
+        if (slot < 0 || slot > 12) return 0;
+        return *reinterpret_cast<int*>(reinterpret_cast<char*>(p) + 0x5A0 + slot * 0x1C);
+    }
+    static bool IsUsableInJetpack(int type) {
+        return std::find(usableWeapons.begin(), usableWeapons.end(), type) != usableWeapons.end();
+    }
+
     // HUD cizilmeden HEMEN once
     static void BeforeHud() {
+        swapped = false;
         accValid = false;
         CSprite2d* spr = CurrentSprite();
         suppress = hooksOk && spr != nullptr;
         if (!spr) { haveCap = false; return; }
         // Hook calisiyorsa ikonu HUD'dan once ciz: mermi yazisi (outline'i ile) ustte kalir.
         if (hooksOk) DrawIcon(spr);
+
+        // Jetpackte kullanilamayan silah elindeyse: HUD cizimi boyunca slotu gecici "yumruk" yap,
+        // boylece mermi sayisi cizilmez (yumruk ikonunu zaten hook yutuyor).
+        if (hideAmmoUnusable && spr == &jetpackSprite) {
+            CPlayerPed* p = FindPlayerPed(0);
+            if (p) {
+                unsigned char slot = ActiveSlot(p);
+                int type = WeaponTypeInSlot(p, slot);
+                if (slot != 0 && type != 0 && !IsUsableInJetpack(type)) {
+                    savedSlot = slot;
+                    ActiveSlot(p) = 0;
+                    swapped = true;
+                }
+            }
+        }
     }
 
     // HUD cizildikten HEMEN sonra
     static void AfterHud() {
+        // Gecici slot degisikligini geri al
+        if (swapped) {
+            CPlayerPed* p = FindPlayerPed(0);
+            if (p) ActiveSlot(p) = savedSlot;
+            swapped = false;
+        }
+
         bool wasSuppressing = suppress;
         suppress = false;
 
