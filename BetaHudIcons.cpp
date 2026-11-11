@@ -234,9 +234,13 @@ public:
 
         int slot = CTxdStore::FindTxdSlot((char*)txd.c_str());
         if (slot < 0) return false;
-        RwTexDictionary* dict = CTxdStore::GetTxd(slot);   // DOGRULA: plugin-sdk'de GetTxd yoksa pool'dan okunur
-        if (!dict) return false;
-        RwTexture* t = RwTexDictionaryFindNamedTexture(dict, tex.c_str());
+        // Slotu gecici aktif yap, RW'dan gecerli sozlugu oku, eski haline dondur.
+        // (Txd henuz streaming ile yuklenmediyse sozluk nullptr olur.)
+        CTxdStore::PushCurrentTxd();
+        CTxdStore::SetCurrentTxd(slot);
+        RwTexDictionary* dict = RwTexDictionaryGetCurrent();
+        RwTexture* t = dict ? RwTexDictionaryFindNamedTexture(dict, tex.c_str()) : nullptr;
+        CTxdStore::PopCurrentTxd();
         if (!t) return false;
         spr.m_pTexture = t;                                 // DOGRULA: alan adi m_pTexture
         return true;
